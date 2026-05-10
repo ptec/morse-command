@@ -72,7 +72,7 @@ export const Channel = {
     } else if (when !== undefined && then === undefined) {
       Channel.__request__(from, when)?.clear()
     } else if (when === undefined && then !== undefined) {
-      from.handlers.forEach((list, when) => {
+      from.handlers.forEach((list, _) => {
         list.delete(then)
       })
     } else if (when === undefined && then === undefined) {
