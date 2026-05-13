@@ -1,4 +1,5 @@
 import { Channel, type Handler } from "./channel"
+import { Input } from "./input"
 import { Scene } from "./scene"
 import { Vector2 } from "./vector2"
 
@@ -19,6 +20,7 @@ export type Stage = {
 
   events: Channel,
 
+  input: Input,
   scene: Scene | undefined,
 }
 
@@ -85,8 +87,12 @@ export const Stage = {
       virtualScale,
 
       events,
+      input: undefined as any,
       scene: undefined,
     }
+
+    // @ts-ignore
+    stage.input = Input.new(stage)
 
     new ResizeObserver(() => Stage.__resize__(stage)).observe(logicalCanvasElement)
 
@@ -103,6 +109,26 @@ export const Stage = {
 
   cue(s: Stage, c: Scene | undefined) {
     Stage.emit(s, "stage:change", c)
+  },
+
+  logicalToVirtual(s: Stage, [x, y]: Vector2) {
+    const [lw, lh] = Stage.getLogicalSize(s)
+    const [vw, vh] = Stage.getVirtualSize(s)
+    const vs       = Stage.getVirtualScale(s)
+    return Vector2.new(
+        (x - lw / 2) / vs + vw / 2,
+        (y - lh / 2) / vs + vh / 2
+    );
+  },
+
+  virtualToLogical(s: Stage, [x, y]: Vector2) {
+    const [lw, lh] = Stage.getLogicalSize (s)
+    const [vw, vh] = Stage.getVirtualSize (s)
+    const vs       = Stage.getVirtualScale(s)
+    return Vector2.new(
+        (x - vw / 2) * vs + lw / 2,
+        (y - vh / 2) * vs + lh / 2
+    );
   },
 
   getLogicalSize(s: Stage) {
@@ -140,6 +166,9 @@ export const Stage = {
   },
 
   update(s: Stage, t: number, dt: number) {
+    Input.poll(s.input)
+    Stage.poll(s      )
+
     const [lw, lh] = Stage.getLogicalSize (s)
     const [vw, vh] = Stage.getVirtualSize (s)
     const vs       = Stage.getVirtualScale(s)
@@ -178,7 +207,6 @@ export const Stage = {
     const t  = (t2 - t0) / 1000;
     const dt = (t2 - t1) / 1000;
 
-    Stage.poll(s)
     Stage.update(s, t, dt)
     Stage.render(s, t, dt)
 

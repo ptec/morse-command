@@ -1,0 +1,1369 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Morse Tank Grid – Reconstructed Latest</title>
+<style>
+  body { margin:0; background:#0b0b0b; color:#fff; font-family:Arial; overflow:hidden; }
+  canvas { display:block; }
+</style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+
+<script>
+console.log("SCRIPT STARTED");
+
+// ================= GLOBAL STATE =================
+let currentTurn = "player"; // "player" | "enemy"
+let phase = "movement";    // "movement" | "shooting" | "command"
+let advantage = "player";  // who wins initiative ties this turn
+
+let selectedTank = null;
+let lastShotDebug = null;
+
+// ================= VISUAL CONSTANTS =================
+const LIGHT_DIR = { x: 0.6, y: 0.8 };
+
+const SHADOW_SCALE_X = 0.5;
+const SHADOW_SCALE_Y = 0.8;
+const SHADOW_OFFSET_DIST = 0.28;
+const SHADOW_ALPHA = 0.35;
+
+const SHADOW_LOCAL_X = -1.5;
+const SHADOW_LOCAL_Y_FACTOR = 0;
+
+// ================= IMAGE ASSETS =================
+const tankImages = {
+  light:  { hull: new Image(), turret: new Image() },
+  medium: { hull: new Image(), turret: new Image() },
+  heavy:  { hull: new Image(), turret: new Image() },
+  td:     { hull: new Image(), turret: new Image() }
+};
+
+// Current test setup: all tanks can use heavy art.
+tankImages.heavy.hull.src = "heavy_hull.png";
+tankImages.heavy.turret.src = "heavy_turret.png";
+
+// Optional fallbacks, so light/medium/td can still draw if assigned later.
+tankImages.light.hull = tankImages.heavy.hull;
+tankImages.light.turret = tankImages.heavy.turret;
+tankImages.medium.hull = tankImages.heavy.hull;
+tankImages.medium.turret = tankImages.heavy.turret;
+tankImages.td.hull = tankImages.heavy.hull;
+tankImages.td.turret = tankImages.heavy.turret;
+
+const mapImage = new Image();
+mapImage.src = "battlemap.png";
+
+const shadowImage = new Image();
+shadowImage.src = "tank_shadow.png";
+
+const trackImage = new Image();
+trackImage.src = "track_mark.png";
+
+const terrainImages = {
+  hard: new Image(),
+  soft: new Image()
+};
+terrainImages.hard.src = "hard_cover.png";
+terrainImages.soft.src = "soft_cover.png";
+
+// ================= CONFIG =================
+const GRID_ROWS = 10;
+const GRID_COLS = 13;
+const letters = "ABCDEFGHIJKLM";
+
+const FIRE_ARC_DEG = 60;
+const FIRE_ARC_HALF = (FIRE_ARC_DEG * Math.PI / 180) / 2;
+const MAX_LOS_RANGE = 6;
+
+const SPRITE_FORWARD_OFFSET = Math.PI / 2;
+const SPRITE_IMAGE_OFFSET = Math.PI;
+const SPRITE_CENTER_OFFSET = 0.15;
+
+const ROT_SPEED = Math.PI;
+const TURRET_ROT_SPEED = Math.PI * 1.5;
+
+// ================= TERRAIN =================
+const TERRAIN = {
+  BLOCKING: "blocking",
+  COVER: "cover"
+};
+
+const terrainMap = new Map();
+terrainMap.set("4,6", TERRAIN.BLOCKING);
+terrainMap.set("5,6", TERRAIN.BLOCKING);
+terrainMap.set("4,7", TERRAIN.BLOCKING);
+terrainMap.set("3,8", TERRAIN.COVER);
+terrainMap.set("4,8", TERRAIN.COVER);
+terrainMap.set("5,8", TERRAIN.COVER);
+
+function terrainKey(r, c) { return `${r},${c}`; }
+function hasCoverTerrain(r, c) { return terrainMap.get(terrainKey(r, c)) === TERRAIN.COVER; }
+function hasBlockingTerrain(r, c) { return terrainMap.get(terrainKey(r, c)) === TERRAIN.BLOCKING; }
+
+// ================= CANVAS =================
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+function resize(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  recalc();
+}
+window.addEventListener("resize", resize);
+
+let CELL, GRID_W, GRID_H, ORIGIN_X, ORIGIN_Y;
+function recalc(){
+  CELL = Math.floor(
+    Math.min(
+      (canvas.width - 260) / GRID_COLS,
+      (canvas.height - 220) / GRID_ROWS
+    )
+  );
+  GRID_W = CELL * GRID_COLS;
+  GRID_H = CELL * GRID_ROWS;
+  ORIGIN_X = Math.floor((canvas.width - GRID_W) / 2) + 40;
+  ORIGIN_Y = Math.floor((canvas.height - GRID_H) / 2) + 40;
+}
+resize();
+
+// ================= MORSE =================
+const MORSE_MAP = {
+  ".-":"A","-...":"B","-.-.":"C","-..":"D",".":"E",
+  "..-.":"F","--.":"G","....":"H","..":"I",".---":"J",
+  "-.-":"K",".-..":"L","--":"M",
+  "-----":"0",".----":"1","..---":"2","...--":"3",
+  "....-":"4",".....":"5","-....":"6","--...":"7",
+  "---..":"8","----.":"9"
+};
+
+const LETTER_MORSE = {
+  A:".-",B:"-...",C:"-.-.",D:"-..",E:".",F:"..-.",
+  G:"--.",H:"....",I:"..",J:".---",K:"-.-",L:".-..",M:"--"
+};
+
+const NUMBER_MORSE = {
+  "1":".----","2":"..---","3":"...--","4":"....-","5":".....",
+  "6":"-....","7":"--...","8":"---..","9":"----.","10":"-----"
+};
+
+// ================= TANKS =================
+const tanks = [
+  {
+    row:7, col:6,
+    isPlayer:true,
+    hp:3,
+    survivability:2,
+    firepower:2,
+    initiative:2,
+    tankType:"heavy",
+    classCode:"H",
+    movedThisTurn:false,
+    hasShotThisPhase:false,
+    x:0, y:0,
+    startX:0, startY:0,
+    targetX:0, targetY:0,
+    moving:false,
+    moveT:0,
+    moveDuration:1.3,
+    movement:3,
+    range:4,
+    angle:-Math.PI/2,
+    visualAngle:-Math.PI/2,
+    targetAngle:-Math.PI/2,
+    rotating:false,
+    turretAngle:-Math.PI/2,
+    pendingMove:null,
+    lastTrackTime:0
+  },
+  {
+    row:7, col:8,
+    isPlayer:true,
+    hp:3,
+    survivability:2,
+    firepower:2,
+    initiative:2,
+    tankType:"heavy",
+    classCode:"H",
+    movedThisTurn:false,
+    hasShotThisPhase:false,
+    x:0, y:0,
+    startX:0, startY:0,
+    targetX:0, targetY:0,
+    moving:false,
+    moveT:0,
+    moveDuration:1.3,
+    movement:3,
+    range:4,
+    angle:-Math.PI/2,
+    visualAngle:-Math.PI/2,
+    targetAngle:-Math.PI/2,
+    rotating:false,
+    turretAngle:-Math.PI/2,
+    pendingMove:null,
+    lastTrackTime:0
+  },
+  {
+    row:3, col:7,
+    isEnemy:true,
+    hp:3,
+    survivability:2,
+    firepower:2,
+    range:4,
+    initiative:3,
+    tankType:"heavy",
+    classCode:"H",
+    movedThisTurn:false,
+    hasShotThisPhase:false,
+    x:0, y:0,
+    startX:0, startY:0,
+    targetX:0, targetY:0,
+    moving:false,
+    moveT:0,
+    moveDuration:1.3,
+    movement:1,
+    angle:Math.PI/2,
+    visualAngle:Math.PI/2,
+    targetAngle:Math.PI/2,
+    rotating:false,
+    turretAngle:Math.PI/2,
+    pendingMove:null,
+    lastTrackTime:0
+  },
+  {
+    row:3, col:9,
+    isEnemy:true,
+    hp:3,
+    survivability:2,
+    firepower:2,
+    range:4,
+    initiative:2,
+    tankType:"heavy",
+    classCode:"H",
+    movedThisTurn:false,
+    hasShotThisPhase:false,
+    x:0, y:0,
+    startX:0, startY:0,
+    targetX:0, targetY:0,
+    moving:false,
+    moveT:0,
+    moveDuration:1.3,
+    movement:1,
+    angle:Math.PI/2,
+    visualAngle:Math.PI/2,
+    targetAngle:Math.PI/2,
+    rotating:false,
+    turretAngle:Math.PI/2,
+    pendingMove:null,
+    lastTrackTime:0
+  }
+];
+
+// Initialize tank world positions.
+tanks.forEach(t => {
+  const p = cellCenter(t.row, t.col);
+  t.x = t.startX = t.targetX = p.x;
+  t.y = t.startY = t.targetY = p.y;
+});
+
+// ================= EFFECT ARRAYS =================
+let previewRow = null, previewCol = null;
+let targetRow = null, targetCol = null;
+let shots = [];
+let floatTexts = [];
+const trackMarks = [];
+let shootIntent = false;
+
+// ================= TURN HELPERS =================
+function startNewTurn() {
+  tanks.forEach(t => {
+    t.movedThisTurn = false;
+    t.hasShotThisPhase = false;
+    t.pendingMove = null;
+    t.lastTrackTime = 0;
+  });
+  phase = "movement";
+}
+
+function endTurn() {
+  currentTurn = currentTurn === "player" ? "enemy" : "player";
+  selectedTank = null;
+  targetRow = targetCol = previewRow = previewCol = null;
+  startNewTurn();
+}
+
+function runCommandPhase() {
+  const playerAlive = tanks.some(t => t.isPlayer && t.hp > 0);
+  const enemyAlive = tanks.some(t => t.isEnemy && t.hp > 0);
+
+  if (!enemyAlive) {
+    alert("MISSION COMPLETE");
+    return;
+  }
+  if (!playerAlive) {
+    alert("MISSION FAILED");
+    return;
+  }
+  endTurn();
+}
+
+function advancePhase() {
+  if (phase === "movement") {
+    phase = "shooting";
+    tanks.forEach(t => t.hasShotThisPhase = false);
+    selectedTank = null;
+    targetRow = targetCol = previewRow = previewCol = null;
+  } else if (phase === "shooting") {
+    phase = "command";
+    runCommandPhase();
+  }
+}
+
+function endPlayerShot(shooter) {
+  shooter.hasShotThisPhase = true;
+  selectedTank = null;
+  targetRow = targetCol = previewRow = previewCol = null;
+
+  if (getEligibleTanksForPhase().length === 0) {
+    advancePhase();
+  }
+}
+
+// ================= GENERAL HELPERS =================
+function isLight(t) { return t.tankType === "light"; }
+function isMedium(t) { return t.tankType === "medium"; }
+function isHeavy(t) { return t.tankType === "heavy"; }
+function isTD(t) { return t.tankType === "td"; }
+
+function dist(a,b,c,d){ return Math.abs(a-c)+Math.abs(b-d); }
+function angleDiff(a,b){ return ((a-b+Math.PI*3)%(Math.PI*2))-Math.PI; }
+function isCloseRange(shooter, target){ return dist(shooter.row, shooter.col, target.row, target.col) === 1; }
+
+function cellCenter(r,c){
+  return {
+    x: ORIGIN_X + c * CELL + CELL / 2,
+    y: ORIGIN_Y + r * CELL + CELL / 2
+  };
+}
+
+function desiredAngle(fr,fc,tr,tc){
+  const dr = tr - fr;
+  const dc = tc - fc;
+  if (Math.abs(dr) >= Math.abs(dc)) return dr < 0 ? -Math.PI/2 : Math.PI/2;
+  return dc > 0 ? 0 : Math.PI;
+}
+
+function rollAttackDie(){
+  const roll = Math.floor(Math.random() * 6);
+  return roll >= 4;
+}
+
+function rollDefenseDice(count){
+  let successes = 0;
+  for (let i = 0; i < count; i++) {
+    const roll = Math.floor(Math.random() * 6);
+    if (roll >= 4) successes++;
+  }
+  return successes;
+}
+
+function shotDirection(targetTank, shooterPos){
+  const dx = shooterPos.x - targetTank.x;
+  const dy = shooterPos.y - targetTank.y;
+  const angleToShooter = Math.atan2(dy, dx);
+  const targetFacingAngle = targetTank.angle;
+  const diff = Math.abs(angleDiff(angleToShooter, targetFacingAngle));
+
+  if (diff < Math.PI / 3) return "front";
+  if (diff < Math.PI * 0.78) return "side";
+  return "rear";
+}
+
+function getTileFlip(r, c) {
+  return {
+    flipX: (r + c) % 2 === 0,
+    flipY: false
+  };
+}
+
+function getEligibleTanksForPhase() {
+  return tanks
+    .filter(t => currentTurn === "player" ? t.isPlayer : t.isEnemy)
+    .filter(t => {
+      if (phase === "movement") return !t.movedThisTurn;
+      if (phase === "shooting") return !t.hasShotThisPhase;
+      return false;
+    })
+    .sort((a, b) => {
+      if (a.initiative !== b.initiative) {
+        return phase === "movement"
+          ? a.initiative - b.initiative
+          : b.initiative - a.initiative;
+      }
+
+      const aIsPlayer = !!a.isPlayer;
+      const bIsPlayer = !!b.isPlayer;
+
+      if (advantage === "player") {
+        return aIsPlayer === bIsPlayer ? 0 : (aIsPlayer ? -1 : 1);
+      }
+      return aIsPlayer === bIsPlayer ? 0 : (aIsPlayer ? 1 : -1);
+    });
+}
+
+// ================= LOS =================
+function raycastLOS(from, to) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const distance = Math.hypot(dx, dy);
+  const steps = Math.ceil(distance / (CELL * 0.25));
+  let inCover = false;
+  let lastCoverCell = null;
+
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const px = from.x + dx * t;
+    const py = from.y + dy * t;
+    const c = Math.floor((px - ORIGIN_X) / CELL);
+    const r = Math.floor((py - ORIGIN_Y) / CELL);
+
+    if (r < 0 || r >= GRID_ROWS || c < 0 || c >= GRID_COLS) continue;
+
+    if (hasBlockingTerrain(r, c)) {
+      return { blocked:true, inCover:false, hullDown:false, hitX:px, hitY:py };
+    }
+
+    if (hasCoverTerrain(r, c)) {
+      inCover = true;
+      lastCoverCell = { r, c };
+    }
+  }
+
+  let hullDown = false;
+  if (inCover && lastCoverCell) {
+    const tr = Math.floor((to.y - ORIGIN_Y) / CELL);
+    const tc = Math.floor((to.x - ORIGIN_X) / CELL);
+    const dr = Math.abs(lastCoverCell.r - tr);
+    const dc = Math.abs(lastCoverCell.c - tc);
+    hullDown = (dr + dc === 1);
+  }
+
+  return { blocked:false, inCover, hullDown, hitX:to.x, hitY:to.y };
+}
+
+// ================= ENEMY AI =================
+function scoreEnemyMove(enemy, player, r, c) {
+  let score = 0;
+  const dNow = dist(enemy.row, enemy.col, player.row, player.col);
+  const dNext = dist(r, c, player.row, player.col);
+
+  if (dNext < dNow) score += 3;
+  if (dNext <= enemy.range) score += 4;
+  if (hasCoverTerrain(r, c)) score += 2;
+
+  const from = cellCenter(r, c);
+  const to = cellCenter(player.row, player.col);
+  const los = raycastLOS(from, to);
+  if (!los.blocked && los.hullDown) score += 3;
+  if (dNext === 1) score -= 1;
+
+  const hypotheticalEnemy = { ...enemy, row:r, col:c, x:from.x, y:from.y };
+  const dir = shotDirection(hypotheticalEnemy, { x: player.x, y: player.y });
+  if (dir === "rear") score -= 4;
+
+  score += Math.random() * 1.5;
+  return score;
+}
+
+function enemyTurnAI() {
+  const eligible = getEligibleTanksForPhase();
+  if (eligible.length === 0) return;
+
+  const shooter = eligible[0];
+  const target = tanks.find(t => t.isPlayer && t.hp > 0);
+  if (!target) return;
+
+  const d = dist(shooter.row, shooter.col, target.row, target.col);
+
+  if (phase === "shooting") {
+    if (d <= 0 || d > shooter.range) {
+      shooter.hasShotThisPhase = true;
+      return;
+    }
+
+    const from = { x: shooter.x, y: shooter.y };
+    const to = cellCenter(target.row, target.col);
+    const los = raycastLOS(from, to);
+
+    shooter.turretAngle = Math.atan2(to.y - shooter.y, to.x - shooter.x);
+
+    shots.push({ x1:from.x, y1:from.y, x2:los.hitX, y2:los.hitY, ttl:15 });
+
+    if (los.blocked) {
+      shooter.hasShotThisPhase = true;
+      return;
+    }
+
+    resolveShot(shooter, target, los, from, to);
+    shooter.hasShotThisPhase = true;
+    return;
+  }
+
+  if (phase === "movement" && !shooter.movedThisTurn) {
+    const options = [
+      { r: shooter.row - 1, c: shooter.col },
+      { r: shooter.row + 1, c: shooter.col },
+      { r: shooter.row, c: shooter.col - 1 },
+      { r: shooter.row, c: shooter.col + 1 }
+    ];
+
+    let best = null;
+    let bestScore = -Infinity;
+
+    for (const o of options) {
+      if (o.r < 0 || o.r >= GRID_ROWS || o.c < 0 || o.c >= GRID_COLS) continue;
+      if (hasBlockingTerrain(o.r, o.c)) continue;
+      if (tanks.some(t => t.row === o.r && t.col === o.c)) continue;
+
+      const score = scoreEnemyMove(shooter, target, o.r, o.c);
+      if (score > bestScore) {
+        bestScore = score;
+        best = o;
+      }
+    }
+
+    if (best) {
+      startTankMove(shooter, best.r, best.c);
+    }
+
+    shooter.movedThisTurn = true;
+    return;
+  }
+}
+
+// ================= SHARED COMBAT =================
+function resolveShot(shooter, target, los, from, to) {
+  let attackDice = shooter.firepower;
+
+  const friendlyLightNearby = tanks.some(t =>
+    t !== shooter &&
+    t.isPlayer === shooter.isPlayer &&
+    isLight(t) &&
+    dist(t.row, t.col, target.row, target.col) === 1
+  );
+  if (friendlyLightNearby) attackDice += 1;
+
+  let hits = 0;
+  let misses = 0;
+
+  for (let i = 0; i < attackDice; i++) {
+    rollAttackDie() ? hits++ : misses++;
+  }
+
+  if (isMedium(shooter) && misses > 0) {
+    if (rollAttackDie()) hits++;
+  }
+
+  let remainingHits = hits;
+  const shotDir = shotDirection(target, from);
+
+  lastShotDebug = {
+    firepower: shooter.firepower,
+    movedThisTurn: shooter.movedThisTurn,
+    attackHits: hits,
+    hullDown: los.hullDown,
+    inCover: los.inCover,
+    defenseDice: 0,
+    defenseSaves: 0,
+    finalDamage: 0,
+    shotDirection: shotDir,
+    survivability: target.survivability,
+    movedTarget: target.movedThisTurn
+  };
+
+  let primaryResult = null;
+
+  if (hits === 0) {
+    primaryResult = { text:"MISS", color:"#aaa" };
+  } else if (los.hullDown && remainingHits > 0) {
+    remainingHits--;
+    primaryResult = { text:"HULL DOWN", color:"#4ca6ff" };
+  }
+
+  if (remainingHits > 0) {
+    let defenseDice =
+      target.survivability +
+      (los.inCover ? 1 : 0) +
+      (target.movedThisTurn ? 1 : 0);
+
+    if (isTD(target) && los.inCover) defenseDice += 1;
+    if (dist(shooter.row, shooter.col, target.row, target.col) === 1) defenseDice -= 1;
+    if (shotDir === "side") defenseDice -= 1;
+
+    defenseDice = Math.max(0, Math.min(6, defenseDice));
+    const saves = rollDefenseDice(defenseDice);
+    remainingHits = Math.max(0, remainingHits - saves);
+
+    if (isHeavy(target) && remainingHits > 0 && saves < defenseDice) {
+      if (rollDefenseDice(1) > 0) remainingHits = Math.max(0, remainingHits - 1);
+    }
+
+    lastShotDebug.defenseDice = defenseDice;
+    lastShotDebug.defenseSaves = saves;
+  }
+
+  if (remainingHits > 0) {
+    let label = `-${remainingHits}`;
+    let color = "#ff4c4c";
+
+    if (shotDir === "rear") {
+      label = `REAR -${remainingHits}`;
+      color = "#ff6b6b";
+    } else if (shotDir === "side") {
+      label = `SIDE -${remainingHits}`;
+      color = "#ff9f43";
+    }
+
+    target.hp -= remainingHits;
+    lastShotDebug.finalDamage = remainingHits;
+    primaryResult = { text: label, color };
+  } else if (!primaryResult) {
+    primaryResult = { text:"DEFENDED", color:"#ffcc00" };
+  }
+
+  if (primaryResult) {
+    floatTexts.push({ x:to.x, y:to.y, text:primaryResult.text, color:primaryResult.color, ttl:40 });
+  }
+}
+
+// ================= MOVEMENT =================
+function startTankMove(t, r, c) {
+  const p = cellCenter(r, c);
+
+  t.startX = t.x;
+  t.startY = t.y;
+  t.targetX = p.x;
+  t.targetY = p.y;
+  t.moveT = 0;
+  t.moving = true;
+
+  t.angle = desiredAngle(t.row, t.col, r, c);
+
+  const dx = t.targetX - t.startX;
+  const dy = t.targetY - t.startY;
+  t.moveAngle = Math.atan2(dy, dx);
+
+  t.row = r;
+  t.col = c;
+}
+
+// ================= INPUT =================
+let shootMode = false;
+let buffer = "", token = "", spaceDown = 0, held = false;
+const HOLD_MS = 300, AUTO_SPACE = 900;
+let autoTimer = null;
+
+window.addEventListener("keydown", e => {
+  if (e.key === "Shift") shootMode = true;
+
+  if (e.code === "Space" && !held) {
+    held = true;
+    spaceDown = Date.now();
+    e.preventDefault();
+  }
+
+  if (e.key === "n" || e.key === "N") {
+    if (currentTurn === "player" && phase !== "command") {
+      advancePhase();
+    }
+  }
+
+  if (e.code === "Enter") {
+    shootIntent = shootMode;
+    decode();
+  }
+});
+
+window.addEventListener("keyup", e => {
+  if (e.key === "Shift") shootMode = false;
+
+  if (e.code !== "Space") return;
+  held = false;
+  addSymbol((Date.now() - spaceDown) < HOLD_MS ? "." : "-");
+});
+
+function rowFromSym(s){
+  if (s === "0") return 9;
+  const n = parseInt(s, 10);
+  return (n >= 1 && n <= 9) ? n - 1 : null;
+}
+
+function applyPreview(tok){
+  const sym = MORSE_MAP[tok];
+  if (!sym) return;
+  if (/^\d$/.test(sym)) {
+    const r = rowFromSym(sym);
+    if (r !== null) { targetRow = r; previewRow = r; }
+  }
+  if (letters.includes(sym)) {
+    const c = letters.indexOf(sym);
+    targetCol = c;
+    previewCol = c;
+  }
+}
+
+function resetAuto(){
+  if (autoTimer) clearTimeout(autoTimer);
+  autoTimer = setTimeout(() => {
+    buffer += " ";
+    if (token) applyPreview(token);
+    token = "";
+  }, AUTO_SPACE);
+}
+
+function addSymbol(s){
+  buffer += s;
+  token += s;
+  resetAuto();
+}
+
+function decode(){
+  if (token) { applyPreview(token); token = ""; }
+  const parts = buffer.trim().split(/\s+/);
+  buffer = "";
+  if (parts.length < 1 || parts.length > 2) return;
+  for (const p of parts) applyPreview(p);
+  if (targetRow !== null && targetCol !== null) handleAction(targetRow, targetCol);
+}
+
+function handleAction(r, c) {
+  if (currentTurn !== "player") return;
+
+  if (!selectedTank) {
+    const t = tanks.find(t => t.row === r && t.col === c);
+    if (!t || !t.isPlayer) return;
+
+    const eligible = getEligibleTanksForPhase();
+    if (eligible.length === 0 || t !== eligible[0]) return;
+
+    selectedTank = t;
+    targetRow = r;
+    targetCol = c;
+    previewRow = r;
+    previewCol = c;
+    return;
+  }
+
+  const wantsToShoot = shootIntent;
+  shootIntent = false;
+
+  if (wantsToShoot) {
+    if (phase !== "shooting") return;
+    if (selectedTank.hasShotThisPhase) {
+      selectedTank = null;
+      targetRow = targetCol = previewRow = previewCol = null;
+      return;
+    }
+
+    const shooter = selectedTank;
+    const target = tanks.find(t => t.row === r && t.col === c && t.isEnemy && t.hp > 0);
+    const d = dist(shooter.row, shooter.col, r, c);
+
+    if (d <= 0 || d > shooter.range) {
+      endPlayerShot(shooter);
+      return;
+    }
+
+    if (!target) {
+      floatTexts.push({ x: cellCenter(r, c).x, y: cellCenter(r, c).y, text:"NO TARGET", color:"#aaa", ttl:35 });
+      endPlayerShot(shooter);
+      return;
+    }
+
+    const from = { x: shooter.x, y: shooter.y };
+    const to = cellCenter(r, c);
+    const los = raycastLOS(from, to);
+
+    shots.push({ x1:from.x, y1:from.y, x2:los.hitX, y2:los.hitY, ttl:15 });
+
+    if (los.blocked) {
+      floatTexts.push({ x:los.hitX, y:los.hitY, text:"BLOCKED", color:"#888", ttl:40 });
+      endPlayerShot(shooter);
+      return;
+    }
+
+    resolveShot(shooter, target, los, from, to);
+    endPlayerShot(shooter);
+    return;
+  }
+
+  if (phase !== "movement") return;
+  if (selectedTank.movedThisTurn) return;
+
+  if (dist(selectedTank.row, selectedTank.col, r, c) <= selectedTank.movement) {
+    const want = desiredAngle(selectedTank.row, selectedTank.col, r, c);
+    const needsRotation = Math.abs(angleDiff(want, selectedTank.angle)) > 0.01;
+
+    if (needsRotation && !selectedTank.pendingMove) {
+      selectedTank.targetAngle = want;
+      selectedTank.rotating = true;
+      selectedTank.pendingMove = { r, c };
+      return;
+    }
+
+    const mr = selectedTank.pendingMove ? selectedTank.pendingMove.r : r;
+    const mc = selectedTank.pendingMove ? selectedTank.pendingMove.c : c;
+    startTankMove(selectedTank, mr, mc);
+    selectedTank.movedThisTurn = true;
+    selectedTank.pendingMove = null;
+    selectedTank = null;
+    targetRow = targetCol = previewRow = previewCol = null;
+  }
+}
+
+// ================= UPDATE =================
+function update(dt){
+  tanks.forEach(t => {
+    if (t.rotating) {
+      const d = angleDiff(t.targetAngle, t.angle);
+      const s = ROT_SPEED * dt;
+      if (Math.abs(d) <= s) {
+        t.angle = t.targetAngle;
+        t.rotating = false;
+      } else {
+        t.angle += Math.sign(d) * s;
+      }
+    }
+
+    if (t.moving) {
+      t.moveT += dt / t.moveDuration;
+      const e = Math.min(1, t.moveT);
+      const k = e * e * (3 - 2 * e);
+
+      t.x = t.startX + (t.targetX - t.startX) * k;
+      t.y = t.startY + (t.targetY - t.startY) * k;
+
+      t.lastTrackTime += dt;
+      if (t.lastTrackTime > 0.25) {
+        t.lastTrackTime = 0;
+        trackMarks.push({
+          x: t.x,
+          y: t.y,
+          angle: Number.isFinite(t.moveAngle) ? t.moveAngle : t.visualAngle,
+          life: 5.0
+        });
+        const MAX_TRACK_MARKS = 300;
+        if (trackMarks.length > MAX_TRACK_MARKS) {
+          trackMarks.splice(0, trackMarks.length - MAX_TRACK_MARKS);
+        }
+      }
+
+      if (Number.isFinite(t.moveAngle)) {
+        const turnSpeed = 6;
+        const diff = ((t.moveAngle - t.visualAngle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+        const step = Math.sign(diff) * Math.min(Math.abs(diff), turnSpeed * dt);
+        t.visualAngle += step;
+      }
+
+      if (e >= 1) {
+        t.x = t.targetX;
+        t.y = t.targetY;
+        t.moving = false;
+        t.lastTrackTime = 0;
+      }
+    }
+
+    if (selectedTank === t && targetRow !== null && targetCol !== null) {
+      const aim = cellCenter(targetRow, targetCol);
+      const want = Math.atan2(aim.y - t.y, aim.x - t.x);
+      const d = angleDiff(want, t.turretAngle);
+      const s = TURRET_ROT_SPEED * dt;
+      if (Math.abs(d) <= s) t.turretAngle = want;
+      else t.turretAngle += Math.sign(d) * s;
+    }
+  });
+}
+
+// ================= DRAW HELPERS =================
+function drawNextPhaseHint() {
+  ctx.save();
+
+  const text = "Press N for Next Phase";
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.setLineDash([]);
+
+  ctx.font = "20px Arial";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+
+  const w = 270;
+  const h = 38;
+  const x = canvas.width / 2 - w / 2;
+  const y = 18;
+
+  ctx.fillStyle = "rgba(0,0,0,0.85)";
+  ctx.fillRect(x, y, w, h);
+
+  ctx.strokeStyle = "yellow";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, y, w, h);
+
+  ctx.fillStyle = "yellow";
+  ctx.fillText(text, canvas.width / 2, y + 8);
+
+  ctx.restore();
+}
+
+    function drawMapBackground() {
+  if (!mapImage.complete || mapImage.naturalWidth === 0) return;
+
+  const gridW = GRID_COLS * CELL;
+  const gridH = GRID_ROWS * CELL;
+  const imgAspect = mapImage.naturalWidth / mapImage.naturalHeight;
+  const gridAspect = gridW / gridH;
+
+  let drawW, drawH;
+  if (imgAspect > gridAspect) {
+    drawH = gridH;
+    drawW = gridH * imgAspect;
+  } else {
+    drawW = gridW;
+    drawH = gridW / imgAspect;
+  }
+
+  const x = ORIGIN_X + (gridW - drawW) / 2;
+  const y = ORIGIN_Y + (gridH - drawH) / 2;
+  ctx.drawImage(mapImage, x, y, drawW, drawH);
+}
+
+function drawGrid(){
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = 0; c < GRID_COLS; c++) {
+      const x = ORIGIN_X + c * CELL;
+      const y = ORIGIN_Y + r * CELL;
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.strokeRect(x, y, CELL, CELL);
+
+      if (selectedTank) {
+        const d = dist(selectedTank.row, selectedTank.col, r, c);
+        if (!shootMode && phase === "movement" && d > 0 && d <= selectedTank.movement) {
+          ctx.fillStyle = "rgba(120,160,255,0.25)";
+          ctx.fillRect(x, y, CELL, CELL);
+        }
+        if (shootMode && phase === "shooting" && d > 0 && d <= selectedTank.range) {
+          ctx.fillStyle = "rgba(255,120,120,0.18)";
+          ctx.fillRect(x, y, CELL, CELL);
+        }
+      }
+    }
+  }
+}
+
+function drawLabels(){
+  ctx.fillStyle = "#fff";
+  for (let c = 0; c < GRID_COLS; c++) {
+    const x = ORIGIN_X + c * CELL + CELL / 2;
+    ctx.textAlign = "center";
+    ctx.font = "14px Arial";
+    ctx.fillText(letters[c], x, ORIGIN_Y - 38);
+    ctx.font = "12px Arial";
+    ctx.fillText(LETTER_MORSE[letters[c]], x, ORIGIN_Y - 20);
+  }
+  for (let r = 0; r < GRID_ROWS; r++) {
+    const y = ORIGIN_Y + r * CELL + CELL / 2 + 5;
+    const label = (r === 9) ? "10" : String(r + 1);
+    ctx.textAlign = "right";
+    ctx.font = "14px Arial";
+    ctx.fillText(label, ORIGIN_X - 42, y);
+    ctx.font = "12px Arial";
+    ctx.fillText(NUMBER_MORSE[label], ORIGIN_X - 10, y);
+  }
+}
+
+function drawPreview(){
+  if (previewCol !== null) {
+    ctx.setLineDash([8,6]);
+    ctx.strokeStyle = "#00ffcc";
+    ctx.beginPath();
+    ctx.moveTo(ORIGIN_X + previewCol * CELL + CELL/2, ORIGIN_Y);
+    ctx.lineTo(ORIGIN_X + previewCol * CELL + CELL/2, ORIGIN_Y + GRID_H);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if (previewRow !== null) {
+    ctx.setLineDash([8,6]);
+    ctx.strokeStyle = "#00ffcc";
+    ctx.beginPath();
+    ctx.moveTo(ORIGIN_X, ORIGIN_Y + previewRow * CELL + CELL/2);
+    ctx.lineTo(ORIGIN_X + GRID_W, ORIGIN_Y + previewRow * CELL + CELL/2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
+function drawFiringArc(){
+  if (!selectedTank || !shootMode || phase !== "shooting") return;
+  ctx.save();
+  ctx.translate(selectedTank.x, selectedTank.y);
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.arc(0, 0, selectedTank.range * CELL,
+    selectedTank.turretAngle - FIRE_ARC_HALF,
+    selectedTank.turretAngle + FIRE_ARC_HALF
+  );
+  ctx.closePath();
+  ctx.fillStyle = "rgba(255,80,80,0.2)";
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawLOSLine(){
+  if (!selectedTank || !shootMode || phase !== "shooting" || targetRow === null || targetCol === null) return;
+
+  const from = { x: selectedTank.x, y: selectedTank.y };
+  const to = cellCenter(targetRow, targetCol);
+  const los = raycastLOS(from, to);
+
+  if (los.blocked) ctx.strokeStyle = "#ff4c4c";
+  else if (los.hullDown) ctx.strokeStyle = "#4ca6ff";
+  else if (los.inCover) ctx.strokeStyle = "#ffcc00";
+  else ctx.strokeStyle = "#4cff4c";
+
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.lineTo(los.hitX, los.hitY);
+  ctx.stroke();
+}
+
+function drawHullDownMarker(){
+  if (!selectedTank || !shootMode || phase !== "shooting" || targetRow === null || targetCol === null) return;
+  const from = { x: selectedTank.x, y: selectedTank.y };
+  const to = cellCenter(targetRow, targetCol);
+  const los = raycastLOS(from, to);
+  if (!los.hullDown) return;
+
+  ctx.save();
+  ctx.strokeStyle = "#4ca6ff";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(to.x, to.y, CELL * 0.35, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawShots(){
+  shots = shots.filter(s => s.ttl-- > 0);
+  shots.forEach(s => {
+    ctx.strokeStyle = "#ffd36a";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(s.x1, s.y1);
+    ctx.lineTo(s.x2, s.y2);
+    ctx.stroke();
+
+    ctx.fillStyle = lastShotDebug?.finalDamage > 0 ? "rgba(255,80,80,0.8)" : "rgba(200,200,200,0.6)";
+    ctx.beginPath();
+    ctx.arc(s.x2, s.y2, CELL * 0.15, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function drawBlockingTerrain() {
+  terrainMap.forEach((type, key) => {
+    if (type !== TERRAIN.BLOCKING) return;
+    const [r, c] = key.split(",").map(Number);
+    const x = ORIGIN_X + c * CELL;
+    const y = ORIGIN_Y + r * CELL;
+    const img = terrainImages.hard;
+
+    if (img.complete && img.naturalWidth > 0) {
+      const { flipX, flipY } = getTileFlip(r, c);
+      ctx.save();
+      ctx.translate(x + CELL/2, y + CELL/2);
+      ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+      ctx.drawImage(img, -CELL/2, -CELL/2, CELL, CELL);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = "rgba(90,90,90,0.9)";
+      ctx.fillRect(x + 4, y + 4, CELL - 8, CELL - 8);
+    }
+  });
+}
+
+function drawCoverTerrain() {
+  terrainMap.forEach((type, key) => {
+    if (type !== TERRAIN.COVER) return;
+    const [r, c] = key.split(",").map(Number);
+    const x = ORIGIN_X + c * CELL;
+    const y = ORIGIN_Y + r * CELL;
+    const img = terrainImages.soft;
+
+    if (img.complete && img.naturalWidth > 0) {
+      const { flipX, flipY } = getTileFlip(r, c);
+      ctx.save();
+      ctx.translate(x + CELL/2, y + CELL/2);
+      ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+      ctx.drawImage(img, -CELL/2, -CELL/2, CELL, CELL);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = "rgba(40,120,40,0.9)";
+      ctx.fillRect(x + 6, y + 6, CELL - 12, CELL - 12);
+    }
+  });
+}
+
+function drawTrackMarks(dt) {
+  for (let i = trackMarks.length - 1; i >= 0; i--) {
+    const mark = trackMarks[i];
+    mark.life -= dt;
+    if (mark.life <= 0) {
+      trackMarks.splice(i, 1);
+      continue;
+    }
+
+    const alpha = Math.min(1, mark.life / 5);
+    const width = CELL * 1.0;
+    const height = CELL * 0.35;
+    const angle = Number.isFinite(mark.angle) ? mark.angle : 0;
+
+    ctx.save();
+    ctx.translate(mark.x, mark.y);
+    ctx.rotate(angle);
+    ctx.globalAlpha = alpha * 0.4;
+
+    if (trackImage.complete && trackImage.naturalWidth > 0) {
+      ctx.drawImage(trackImage, -width/2, -height/2, width, height);
+    } else {
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(-width/2, -height/2, width, height);
+    }
+    ctx.restore();
+  }
+}
+
+function drawTankShadowSprite(t) {
+  if (!shadowImage.complete || shadowImage.naturalWidth === 0) return;
+
+  const offsetX = LIGHT_DIR.x * CELL * SHADOW_OFFSET_DIST;
+  const offsetY = LIGHT_DIR.y * CELL * SHADOW_OFFSET_DIST;
+  const baseSize = CELL * 1.2;
+  const shadowW = baseSize * SHADOW_SCALE_X;
+  const shadowH = baseSize * SHADOW_SCALE_Y;
+  const localY = -CELL * SHADOW_LOCAL_Y_FACTOR;
+
+  ctx.save();
+  ctx.translate(t.x + offsetX, t.y + offsetY);
+  ctx.rotate(t.visualAngle + SPRITE_FORWARD_OFFSET);
+  ctx.globalAlpha = SHADOW_ALPHA;
+  ctx.drawImage(shadowImage, -shadowW/2 + SHADOW_LOCAL_X, -shadowH/2 + localY, shadowW, shadowH);
+  ctx.restore();
+}
+
+function drawTanks() {
+  const eligibleTanks = getEligibleTanksForPhase();
+
+  tanks.forEach(t => {
+    if (t.hp <= 0) return;
+
+    const w = CELL * 0.7;
+    const h = CELL * 0.9;
+    const imgs = tankImages[t.tankType];
+
+    drawTankShadowSprite(t);
+
+    if (imgs && imgs.hull && imgs.hull.complete && imgs.hull.naturalWidth > 0) {
+      const hullImg = imgs.hull;
+      const maxSize = CELL * 1.2;
+      const aspect = hullImg.naturalWidth / hullImg.naturalHeight;
+      let hullW, hullH;
+      if (aspect >= 1) {
+        hullW = maxSize;
+        hullH = maxSize / aspect;
+      } else {
+        hullH = maxSize;
+        hullW = maxSize * aspect;
+      }
+
+      ctx.save();
+      ctx.translate(t.x, t.y);
+      ctx.rotate(t.visualAngle + SPRITE_FORWARD_OFFSET + SPRITE_IMAGE_OFFSET);
+      const offsetY = hullH * SPRITE_CENTER_OFFSET;
+      ctx.drawImage(hullImg, -hullW/2, -hullH/2 + offsetY, hullW, hullH);
+      ctx.restore();
+    } else {
+      ctx.save();
+      ctx.translate(t.x, t.y);
+      ctx.rotate(t.visualAngle);
+      ctx.fillStyle = t.isPlayer ? "#2f4f7f" : "#7f3f2f";
+      ctx.fillRect(-w/2, -h/2, w, h);
+      ctx.restore();
+    }
+
+    if (imgs && imgs.turret && imgs.turret.complete && imgs.turret.naturalWidth > 0) {
+      const turretImg = imgs.turret;
+      const maxSize = CELL * 1.2;
+      const aspect = turretImg.naturalWidth / turretImg.naturalHeight;
+      let turretW, turretH;
+      if (aspect >= 1) {
+        turretW = maxSize;
+        turretH = maxSize / aspect;
+      } else {
+        turretH = maxSize;
+        turretW = maxSize * aspect;
+      }
+
+      ctx.save();
+      ctx.translate(t.x, t.y);
+      ctx.rotate(t.turretAngle + SPRITE_FORWARD_OFFSET + SPRITE_IMAGE_OFFSET);
+      const offsetY = turretH * SPRITE_CENTER_OFFSET;
+      ctx.drawImage(turretImg, -turretW/2, -turretH/2 + offsetY, turretW, turretH);
+      ctx.restore();
+    }
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "12px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText(`HP:${t.hp}`, t.x, t.y + CELL * 0.6);
+
+    ctx.save();
+    ctx.translate(t.x, t.y);
+    ctx.rotate(t.visualAngle + SPRITE_FORWARD_OFFSET);
+    ctx.fillStyle = "rgba(255,255,255,0.65)";
+    ctx.font = `${Math.floor(CELL * 0.18)}px monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${t.classCode}${t.initiative}`, 0, h * 0.25);
+    ctx.restore();
+
+    const isEligible = eligibleTanks[0] === t;
+    if (t === selectedTank) {
+      ctx.strokeStyle = "gold";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(t.x - w/2 - 2, t.y - h/2 - 2, w + 4, h + 4);
+    } else if (isEligible && currentTurn === "player") {
+      ctx.strokeStyle = "rgba(255,215,0,0.6)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(t.x - w/2 - 2, t.y - h/2 - 2, w + 4, h + 4);
+    }
+  });
+}
+
+function drawFloatTexts(){
+  floatTexts = floatTexts.filter(t => t.ttl-- > 0);
+  floatTexts.forEach(t => {
+    ctx.fillStyle = t.color;
+    ctx.font = "16px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText(t.text, t.x, t.y);
+    t.y -= 0.5;
+  });
+}
+
+    function drawNextPhaseHint() {
+        // Only show during player turn (not command phase)
+        if (currentTurn !== "player" || phase === "command") return;
+
+        ctx.save();
+
+        // Position (bottom-right corner)
+        const padding = 20;
+        const text = "Press N for Next Phase";
+
+        ctx.font = "14px Arial";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "bottom";
+
+        const x = canvas.width - padding;
+        const y = canvas.height - padding;
+
+        // Background box (optional but nice)
+        const metrics = ctx.measureText(text);
+        const boxWidth = metrics.width + 20;
+        const boxHeight = 26;
+
+        ctx.fillStyle = "rgba(0,0,0,0.6)";
+        ctx.fillRect(x - boxWidth, y - boxHeight + 6, boxWidth, boxHeight);
+
+        // Text
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(text, x - 10, y);
+
+        ctx.restore();
+    }
+
+function drawCombatDebugHUD(){
+  ctx.save();
+  ctx.fillStyle = "rgba(0,0,0,0.7)";
+  ctx.fillRect(20, 20, 300, lastShotDebug ? 240 : 70);
+  ctx.strokeStyle = "rgba(255,255,255,0.3)";
+  ctx.strokeRect(20, 20, 300, lastShotDebug ? 240 : 70);
+  ctx.fillStyle = "#fff";
+  ctx.font = "13px monospace";
+  ctx.textAlign = "left";
+
+  let y = 42;
+  function line(text){ ctx.fillText(text, 30, y); y += 16; }
+
+  line(`TURN: ${currentTurn.toUpperCase()}`);
+  line(`PHASE: ${phase.toUpperCase()}`);
+
+  if (lastShotDebug) {
+    line("----------------");
+    line("=== LAST SHOT ===");
+    line(`Firepower: ${lastShotDebug.firepower}`);
+    line(`Stationary: ${!lastShotDebug.movedThisTurn}`);
+    line(`Attack Hits: ${lastShotDebug.attackHits}`);
+    line(`Shot Dir: ${lastShotDebug.shotDirection}`);
+    line(`Hull Down: ${lastShotDebug.hullDown}`);
+    line(`In Cover: ${lastShotDebug.inCover}`);
+    line(`Target Moved: ${lastShotDebug.movedTarget}`);
+    line(`Survivability: ${lastShotDebug.survivability}`);
+    line(`Defense Dice: ${lastShotDebug.defenseDice}`);
+    line(`Defense Saves: ${lastShotDebug.defenseSaves}`);
+    line(`Final Damage: ${lastShotDebug.finalDamage}`);
+  }
+  ctx.restore();
+}
+
+// ================= LOOP =================
+let last = performance.now();
+function loop(now) {
+  if (currentTurn === "enemy") {
+    const eligible = getEligibleTanksForPhase();
+    if (eligible.length > 0) enemyTurnAI();
+    else advancePhase();
+  }
+
+  const dt = (now - last) / 1000;
+  last = now;
+
+  update(dt);
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawMapBackground();
+  drawGrid();
+  drawLabels();
+  drawPreview();
+  drawFiringArc();
+  drawLOSLine();
+  drawHullDownMarker();
+  drawShots();
+  drawBlockingTerrain();
+  drawCoverTerrain();
+  drawTrackMarks(dt);
+  drawTanks();
+    drawFloatTexts();
+
+  drawCombatDebugHUD();
+    drawNextPhaseHint();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

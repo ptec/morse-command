@@ -1,10 +1,20 @@
-import type { Stage } from "./stage"
+import { Stage } from "./stage"
+import type { Vector2 } from "./vector2"
 
 export type Scene = {
-  onAttach ?: (s: Stage) => void,
-  onDetach ?: (s: Stage) => void,
+  stage ?: Stage,
+
+  onAttach ?: (stage: Stage) => void,
+  onDetach ?: (stage: Stage) => void,
   onRender ?: (c: Scene.RenderContext) => void,
   onUpdate ?: (c: Scene.UpdateContext) => void,
+
+  onKeyUp     ?: (k: string ) => void,
+  onKeyDown   ?: (k: string ) => void,
+  onMouseUp   ?: (b: number ) => void,
+  onMouseDown ?: (b: number ) => void,
+  onMouseMove ?: (m: Vector2) => void,
+  onWheel     ?: (w: Vector2) => void,
 }
 
 export namespace Scene {
@@ -36,19 +46,60 @@ export namespace Scene {
 }
 
 export const Scene = {
-  render(s: Scene | undefined, c: Scene.RenderContext) {
-    if (s && s.onRender) s.onRender(c)
+  attach(maybeScene: Scene | undefined, stage: Stage) {
+    if (maybeScene) {
+      maybeScene.stage = stage
+      if (maybeScene.onAttach)
+        maybeScene.onAttach(stage)
+    }
+  },
+  
+  detach(maybeScene: Scene | undefined, stage: Stage) {
+    if (maybeScene) {
+      if (maybeScene.onDetach)
+        maybeScene.onDetach(stage)
+      maybeScene.stage = undefined
+    }
   },
 
-  update(s: Scene | undefined, c: Scene.UpdateContext) {
-    if (s && s.onUpdate) s.onUpdate(c)
+  render(maybeScene: Scene | undefined, c: Scene.RenderContext) {
+    if (maybeScene && maybeScene.onRender) maybeScene.onRender(c)
   },
 
-  attach(s: Scene | undefined, c: Stage) {
-    if (s && s.onAttach) s.onAttach(c)
+  update(maybeScene: Scene | undefined, c: Scene.UpdateContext) {
+    if (maybeScene && maybeScene.onUpdate) maybeScene.onUpdate(c)
   },
 
-  detach(s: Scene | undefined, c: Stage) {
-    if (s && s.onDetach) s.onDetach(c)
+  keyUp    (maybeScene: Scene | undefined, ke: KeyboardEvent) {
+    if (maybeScene && maybeScene.onKeyUp    ) maybeScene.onKeyUp    (ke.key)
+  },
+
+  keyDown  (maybeScene: Scene | undefined, ke: KeyboardEvent) {
+    if (maybeScene && maybeScene.onKeyDown  ) maybeScene.onKeyDown  (ke.key)
+  },
+
+  mouseUp  (maybeScene: Scene | undefined, me: MouseEvent) {
+    if (maybeScene && maybeScene.onMouseUp  ) maybeScene.onMouseUp  (me.button)
+  },
+
+  mouseDown(maybeScene: Scene | undefined, me: MouseEvent) {
+    if (maybeScene && maybeScene.onMouseDown) maybeScene.onMouseDown(me.button)
+  },
+
+  mouseMove(maybeScene: Scene | undefined, me: MouseEvent) {
+    if (maybeScene && maybeScene.onMouseMove) maybeScene.onMouseMove(
+      Stage.logicalToVirtual(
+        maybeScene.stage!, [
+        me.offsetX,
+        me.offsetY
+      ])
+    )
+  },
+
+  wheel(maybeScene: Scene | undefined, we: WheelEvent) {
+    if (maybeScene && maybeScene.onWheel) maybeScene.onWheel([
+      we.deltaX,
+      we.deltaY
+    ])
   },
 }
